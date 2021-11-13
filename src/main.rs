@@ -1,7 +1,8 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use log::{info, warn};
+use log::{info, trace, warn};
+use smtp_adapter::protocol::Command;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +25,9 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+const AGENT: &str = "220 smtp.worse.email ESMTP Postfix\n";
 async fn handle_connection(mut socket: TcpStream) -> anyhow::Result<()> {
+    socket.write_all(AGENT.as_bytes()).await?;
     let mut buf = vec![0; 1024];
 
     // In a loop, read data from the socket and write the data back.
