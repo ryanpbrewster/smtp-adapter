@@ -16,6 +16,9 @@ async fn main() -> anyhow::Result<()> {
         let (socket, a) = listener.accept().await?;
         info!("client connected on {}", a);
 
-        tokio::spawn(handle_connection(socket));
+        tokio::spawn(async move {
+            handle_connection(socket).await;
+            info!("client disconnected from {}", a);
+        });
     }
 }
