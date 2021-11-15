@@ -1,5 +1,6 @@
 use anyhow::anyhow;
 use nom::{
+    branch::alt,
     bytes::complete::{tag, take_while1},
     character::complete::{multispace0, multispace1},
     combinator::{all_consuming, value},
@@ -9,10 +10,12 @@ use nom::{
 
 pub enum Command {
     Helo { name: String },
+    Quit,
 }
 #[derive(Clone)]
 enum CommandKind {
     Helo,
+    Quit,
 }
 
 pub fn parse_command(input: &[u8]) -> anyhow::Result<Command> {
@@ -31,11 +34,15 @@ fn command_parser(input: &[u8]) -> IResult<&[u8], Command> {
     let (input, _) = multispace1(input)?;
     match kind {
         CommandKind::Helo => helo_parser(input),
+        CommandKind::Quit => quit_parser(input),
     }
 }
 
 fn command_kind_parser(input: &[u8]) -> IResult<&[u8], CommandKind> {
-    value(CommandKind::Helo, tag("HELO"))(input)
+    alt((
+        value(CommandKind::Helo, tag("HELO")),
+        value(CommandKind::Quit, tag("QUIT")),
+    ))(input)
 }
 
 fn helo_parser(input: &[u8]) -> IResult<&[u8], Command> {
@@ -46,4 +53,8 @@ fn helo_parser(input: &[u8]) -> IResult<&[u8], Command> {
             name: String::from_utf8(name.to_vec()).unwrap(),
         },
     ))
+}
+
+fn quit_parser(input: &[u8]) -> IResult<&[u8], Command> {
+    Ok((input, Command::Quit))
 }

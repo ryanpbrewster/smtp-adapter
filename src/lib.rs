@@ -26,14 +26,16 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
         let cmd = parse_command(&buf[..n])?;
         let reply = match cmd {
             Command::Helo { name } => format!("250 Hello {}, I am glad to meet you\n", name),
+            Command::Quit => return Ok(()),
         };
-        println!("writing: {}", reply);
         socket.write_all(reply.as_bytes()).await?;
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::atomic::AtomicU32;
+
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
@@ -41,14 +43,21 @@ mod test {
 
     use crate::{handle_connection, AGENT};
 
-    const ADDR: &str = "localhost:1984";
+    // This is a little janky, we consume a port per test.
+    static TEST_PORT: AtomicU32 = AtomicU32::new(1984);
+    async fn setup() -> anyhow::Result<TcpStream> {
+        let port = TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let addr = format!("localhost:{}", port);
+        let listener = TcpListener::bind(&addr).await?;
+        let client = TcpStream::connect(&addr).await?;
+        let (socket, _) = listener.accept().await?;
+        tokio::spawn(handle_connection(socket));
+        Ok(client)
+    }
 
     #[tokio::test]
     async fn smoke_test() -> anyhow::Result<()> {
-        let listener = TcpListener::bind(ADDR).await?;
-        let mut client = TcpStream::connect(ADDR).await?;
-        let (socket, _) = listener.accept().await?;
-        let job = tokio::spawn(handle_connection(socket));
+        let mut client = setup().await?;
         let mut buf: Vec<u8> = vec![0; 1_024];
 
         let n = client.read(&mut buf).await?;
@@ -58,11 +67,19 @@ mod test {
         let n = client.read(&mut buf).await?;
         assert_eq!(
             std::str::from_utf8(&buf[..n])?,
-            "250 Hello example.com, I am glad to meet you"
+            "250 Hello example.com, I am glad to meet you\n"
         );
+        Ok(())
+    }
 
-        std::mem::drop(client);
-        job.await?;
+    #[tokio::test]
+    async fn quit_test() -> anyhow::Result<()> {
+        let mut client = setup().await?;
+        client.write_all("QUIT".as_bytes()).await?;
+
+        let mut buf: Vec<u8> = vec![0; 1_024];
+        // The server should close the stream, so we should get back an empty read eventually.
+        while client.read(&mut buf).await? > 0 {}
         Ok(())
     }
 }
