@@ -25,7 +25,7 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
         }
         let cmd = parse_command(&buf[..n])?;
         let reply = match cmd {
-            Command::Helo { name } => format!("250 Hello {}, I am glad to meet you", name),
+            Command::Helo { name } => format!("250 Hello {}, I am glad to meet you\n", name),
         };
         println!("writing: {}", reply);
         socket.write_all(reply.as_bytes()).await?;

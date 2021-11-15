@@ -1,8 +1,9 @@
 use anyhow::anyhow;
 use nom::{
     bytes::complete::{tag, take_while1},
-    character::complete::multispace1,
+    character::complete::{multispace0, multispace1},
     combinator::{all_consuming, value},
+    sequence::terminated,
     AsChar, IResult,
 };
 
@@ -15,7 +16,7 @@ enum CommandKind {
 }
 
 pub fn parse_command(input: &[u8]) -> anyhow::Result<Command> {
-    match all_consuming(command_parser)(input) {
+    match all_consuming(terminated(command_parser, multispace0))(input) {
         Ok((_, cmd)) => Ok(cmd),
         Err(err) => Err(anyhow!(
             "could not parse command from '{}', {}",
