@@ -24,10 +24,20 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
             return Ok(());
         }
         let cmd = parse_command(&buf[..n])?;
+        println!("[RECV] got {:?}", cmd);
         let reply = match cmd {
-            Command::Helo { name } => format!("250 Hello {}, I am glad to meet you\n", name),
+            Command::Helo { domain: name } => {
+                format!("250 Hello {}, I am glad to meet you\n", name)
+            }
+            Command::Ehlo { domain: name } => {
+                format!("250 Hello {}, I am glad to meet you\n", name)
+            }
+            Command::MailFrom { .. } => "250 Ok\n".to_owned(),
+            Command::RcptTo { .. } => "250 Ok\n".to_owned(),
+            Command::Data => "354 End data with <CR><LF>.<CR><LF>\n".to_owned(),
             Command::Quit => return Ok(()),
         };
+        println!("[RECV] replying w/ {}", reply);
         socket.write_all(reply.as_bytes()).await?;
     }
 }
@@ -61,12 +71,12 @@ mod test {
         let mut buf: Vec<u8> = vec![0; 1_024];
 
         let n = client.read(&mut buf).await?;
-        assert_eq!(std::str::from_utf8(&buf[..n])?, AGENT);
+        assert_eq!(String::from_utf8_lossy(&buf[..n]), AGENT);
 
         client.write_all("HELO example.com".as_bytes()).await?;
         let n = client.read(&mut buf).await?;
         assert_eq!(
-            std::str::from_utf8(&buf[..n])?,
+            String::from_utf8_lossy(&buf[..n]),
             "250 Hello example.com, I am glad to meet you\n"
         );
         Ok(())
@@ -79,6 +89,34 @@ mod test {
 
         let mut buf: Vec<u8> = vec![0; 1_024];
         // The server should close the stream, so we should get back an empty read eventually.
+        while client.read(&mut buf).await? > 0 {}
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn data_test() -> anyhow::Result<()> {
+        let mut client = setup().await?;
+        let mut buf: Vec<u8> = vec![0; 1_024];
+
+        let n = client.read(&mut buf).await?;
+        assert_eq!(String::from_utf8_lossy(&buf[..n]), AGENT);
+
+        client.write_all("DATA".as_bytes()).await?;
+        let n = client.read(&mut buf).await?;
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]),
+            "354 End data with <CR><LF>.<CR><LF>\n"
+        );
+
+        // TODO(rpb): this should be legal, we need to do state-tracking in the handler.
+        client.write_all("Line 1\n".as_bytes()).await?;
+        client.write_all("Line 2\n".as_bytes()).await?;
+        client.write_all("Line 3\n".as_bytes()).await?;
+        client.write_all(".\n".as_bytes()).await?;
+        let n = client.read(&mut buf).await?;
+        assert_eq!(String::from_utf8_lossy(&buf[..n]), "250 Ok");
+
+        client.write_all("QUIT".as_bytes()).await?;
         while client.read(&mut buf).await? > 0 {}
         Ok(())
     }

@@ -1,2 +1,2 @@
 serve:
-  RUST_LOG=smtp-adapter=trace cargo run
+  RUST_LOG=smtp_adapter=trace cargo run
