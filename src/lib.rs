@@ -1,3 +1,4 @@
+use anyhow::anyhow;
 use log::warn;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -10,14 +11,13 @@ const AGENT: &str = "220 smtp.worse.email ESMTP Postfix\n";
 pub async fn handle_connection(mut socket: TcpStream) {
     if let Err(err) = connection_handler(&mut socket).await {
         warn!("broken client: {}", err);
-        let _ = socket
-            .write_all(format!("error: {}\n", err).as_bytes())
-            .await;
+        let _ = socket.write_all(format!("{}\n", err).as_bytes()).await;
     }
 }
 
 enum SessionState {
     Initial,
+    Greeted,
     ReadingData { data: Vec<u8> },
 }
 async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
@@ -33,6 +33,35 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
             return Ok(());
         }
         match state {
+            SessionState::Initial => {
+                let cmd = parse_command(&buf)?;
+                let reply = match cmd {
+                    Command::Quit => return Ok(()),
+                    Command::Helo { domain } | Command::Ehlo { domain } => {
+                        state = SessionState::Greeted;
+                        format!("250 Hello {}, I am glad to meet you\n", domain)
+                    }
+                    Command::MailFrom { .. } | Command::RcptTo { .. } | Command::Data => {
+                        return Err(anyhow!("500 You haven't said hello yet!\n"));
+                    }
+                };
+                socket.write_all(reply.as_bytes()).await?;
+            }
+            SessionState::Greeted => {
+                let cmd = parse_command(&buf)?;
+                let reply = match cmd {
+                    Command::Quit => return Ok(()),
+                    Command::Helo { .. } | Command::Ehlo { .. } => {
+                        return Err(anyhow!("500 You already said hello...\n"));
+                    }
+                    Command::MailFrom { .. } | Command::RcptTo { .. } => "250 Ok\n".to_owned(),
+                    Command::Data => {
+                        state = SessionState::ReadingData { data: Vec::new() };
+                        "354 End data with <CR><LF>.<CR><LF>\n".to_owned()
+                    }
+                };
+                socket.write_all(reply.as_bytes()).await?;
+            }
             SessionState::ReadingData { ref mut data } => {
                 if buf == b".\n" || buf == b".\r\n" {
                     socket.write_all("250 Ok\n".as_bytes()).await?;
@@ -40,25 +69,6 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
                 } else {
                     data.extend(&buf);
                 }
-            }
-            SessionState::Initial => {
-                let cmd = parse_command(&buf)?;
-                let reply = match cmd {
-                    Command::Helo { domain } => {
-                        format!("250 Hello {}, I am glad to meet you\n", domain)
-                    }
-                    Command::Ehlo { domain } => {
-                        format!("250 Hello {}, I am glad to meet you\n", domain)
-                    }
-                    Command::MailFrom { .. } => "250 Ok\n".to_owned(),
-                    Command::RcptTo { .. } => "250 Ok\n".to_owned(),
-                    Command::Data => {
-                        state = SessionState::ReadingData { data: Vec::new() };
-                        "354 End data with <CR><LF>.<CR><LF>\n".to_owned()
-                    }
-                    Command::Quit => return Ok(()),
-                };
-                socket.write_all(reply.as_bytes()).await?;
             }
         };
     }
@@ -107,10 +117,10 @@ mod test {
 
         assert_eq!(client.line().await?, AGENT);
 
-        client.write_all("HELO example.com\n".as_bytes()).await?;
+        client.write_all("HELO yo.dog\n".as_bytes()).await?;
         assert_eq!(
             client.line().await?,
-            "250 Hello example.com, I am glad to meet you\n"
+            "250 Hello yo.dog, I am glad to meet you\n"
         );
 
         Ok(())
@@ -129,8 +139,13 @@ mod test {
     #[tokio::test]
     async fn data_test() -> anyhow::Result<()> {
         let mut client = setup().await?;
-
         assert_eq!(client.line().await?, AGENT);
+
+        client.write_all("HELO yo.dog\n".as_bytes()).await?;
+        assert_eq!(
+            client.line().await?,
+            "250 Hello yo.dog, I am glad to meet you\n"
+        );
 
         client.write_all("DATA\n".as_bytes()).await?;
         assert_eq!(
@@ -147,6 +162,17 @@ mod test {
         client.write_all("QUIT\n".as_bytes()).await?;
         while !client.line().await?.is_empty() {}
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn data_cannot_be_invoked_without_helo() -> anyhow::Result<()> {
+        let mut client = setup().await?;
+
+        assert_eq!(client.line().await?, AGENT);
+
+        client.write_all("DATA\n".as_bytes()).await?;
+        assert_eq!(client.line().await?, "500 You haven't said hello yet!\n");
         Ok(())
     }
 }
