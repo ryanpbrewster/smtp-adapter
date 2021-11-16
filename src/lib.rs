@@ -66,7 +66,7 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use tokio::{
         io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -74,11 +74,25 @@ mod test {
     };
 
     use crate::{handle_connection, AGENT};
+    use async_trait::async_trait;
+
+    #[async_trait]
+    trait SimpleTestStream {
+        async fn line(&mut self) -> anyhow::Result<String>;
+    }
+    #[async_trait]
+    impl SimpleTestStream for BufReader<TcpStream> {
+        async fn line(&mut self) -> anyhow::Result<String> {
+            let mut buf = String::new();
+            self.read_line(&mut buf).await?;
+            Ok(buf)
+        }
+    }
 
     // This is a little janky, we consume a port per test.
     static TEST_PORT: AtomicU32 = AtomicU32::new(1984);
     async fn setup() -> anyhow::Result<BufReader<TcpStream>> {
-        let port = TEST_PORT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let port = TEST_PORT.fetch_add(1, Ordering::SeqCst);
         let addr = format!("localhost:{}", port);
         let listener = TcpListener::bind(&addr).await?;
         let client = TcpStream::connect(&addr).await?;
@@ -90,16 +104,15 @@ mod test {
     #[tokio::test]
     async fn smoke_test() -> anyhow::Result<()> {
         let mut client = setup().await?;
-        let mut buf = String::with_capacity(1_024);
 
-        client.read_line(&mut buf).await?;
-        assert_eq!(buf, AGENT);
-        buf.clear();
+        assert_eq!(client.line().await?, AGENT);
 
         client.write_all("HELO example.com\n".as_bytes()).await?;
-        client.read_line(&mut buf).await?;
-        assert_eq!(buf, "250 Hello example.com, I am glad to meet you\n");
-        buf.clear();
+        assert_eq!(
+            client.line().await?,
+            "250 Hello example.com, I am glad to meet you\n"
+        );
+
         Ok(())
     }
 
@@ -108,37 +121,32 @@ mod test {
         let mut client = setup().await?;
         client.write_all("QUIT\n".as_bytes()).await?;
 
-        let mut buf = String::new();
         // The server should close the stream, so we should get back an empty read eventually.
-        while client.read_line(&mut buf).await? > 0 {}
+        while !client.line().await?.is_empty() {}
         Ok(())
     }
 
     #[tokio::test]
     async fn data_test() -> anyhow::Result<()> {
         let mut client = setup().await?;
-        let mut buf = String::new();
 
-        client.read_line(&mut buf).await?;
-        assert_eq!(buf, AGENT);
-        buf.clear();
+        assert_eq!(client.line().await?, AGENT);
 
         client.write_all("DATA\n".as_bytes()).await?;
-        client.read_line(&mut buf).await?;
-        assert_eq!(buf, "354 End data with <CR><LF>.<CR><LF>\n");
-        buf.clear();
+        assert_eq!(
+            client.line().await?,
+            "354 End data with <CR><LF>.<CR><LF>\n"
+        );
 
-        // TODO(rpb): this should be legal, we need to do state-tracking in the handler.
         client.write_all("Line 1\n".as_bytes()).await?;
         client.write_all("Line 2\n".as_bytes()).await?;
         client.write_all("Line 3\n".as_bytes()).await?;
         client.write_all(".\n".as_bytes()).await?;
-        client.read_line(&mut buf).await?;
-        assert_eq!(buf, "250 Ok\n");
-        buf.clear();
+        assert_eq!(client.line().await?, "250 Ok\n");
 
         client.write_all("QUIT\n".as_bytes()).await?;
-        while client.read_line(&mut buf).await? > 0 {}
+        while !client.line().await?.is_empty() {}
+
         Ok(())
     }
 }
