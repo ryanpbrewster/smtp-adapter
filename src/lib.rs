@@ -20,6 +20,57 @@ enum SessionState {
     Greeted,
     ReadingData { data: Vec<u8> },
 }
+enum Response {
+    Quit,
+    Continue,
+    Reply(String),
+}
+impl SessionState {
+    fn handle(&mut self, line: &[u8]) -> anyhow::Result<Response> {
+        let response = match self {
+            SessionState::Initial => {
+                let cmd = parse_command(line)?;
+                match cmd {
+                    Command::Quit => Response::Quit,
+                    Command::Helo { domain } | Command::Ehlo { domain } => {
+                        *self = SessionState::Greeted;
+                        Response::Reply(format!("250 Hello {}, I am glad to meet you\n", domain))
+                    }
+                    Command::MailFrom { .. } | Command::RcptTo { .. } | Command::Data => {
+                        return Err(anyhow!("500 You haven't said hello yet!\n"));
+                    }
+                }
+            }
+            SessionState::Greeted => {
+                let cmd = parse_command(line)?;
+                match cmd {
+                    Command::Quit => Response::Quit,
+                    Command::Helo { .. } | Command::Ehlo { .. } => {
+                        return Err(anyhow!("500 You already said hello...\n"));
+                    }
+                    Command::MailFrom { .. } | Command::RcptTo { .. } => {
+                        Response::Reply("250 Ok\n".to_owned())
+                    }
+                    Command::Data => {
+                        *self = SessionState::ReadingData { data: Vec::new() };
+                        Response::Reply("354 End data with <CR><LF>.<CR><LF>\n".to_owned())
+                    }
+                }
+            }
+            SessionState::ReadingData { data } => {
+                if line == b".\n" || line == b".\r\n" {
+                    *self = SessionState::Initial;
+                    Response::Reply("250 Ok\n".to_owned())
+                } else {
+                    data.extend(line);
+                    Response::Continue
+                }
+            }
+        };
+        Ok(response)
+    }
+}
+
 async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
     let mut socket = BufReader::new(socket);
     socket.write_all(AGENT.as_bytes()).await?;
@@ -32,44 +83,10 @@ async fn connection_handler(socket: &mut TcpStream) -> anyhow::Result<()> {
         if buf.is_empty() {
             return Ok(());
         }
-        match state {
-            SessionState::Initial => {
-                let cmd = parse_command(&buf)?;
-                let reply = match cmd {
-                    Command::Quit => return Ok(()),
-                    Command::Helo { domain } | Command::Ehlo { domain } => {
-                        state = SessionState::Greeted;
-                        format!("250 Hello {}, I am glad to meet you\n", domain)
-                    }
-                    Command::MailFrom { .. } | Command::RcptTo { .. } | Command::Data => {
-                        return Err(anyhow!("500 You haven't said hello yet!\n"));
-                    }
-                };
-                socket.write_all(reply.as_bytes()).await?;
-            }
-            SessionState::Greeted => {
-                let cmd = parse_command(&buf)?;
-                let reply = match cmd {
-                    Command::Quit => return Ok(()),
-                    Command::Helo { .. } | Command::Ehlo { .. } => {
-                        return Err(anyhow!("500 You already said hello...\n"));
-                    }
-                    Command::MailFrom { .. } | Command::RcptTo { .. } => "250 Ok\n".to_owned(),
-                    Command::Data => {
-                        state = SessionState::ReadingData { data: Vec::new() };
-                        "354 End data with <CR><LF>.<CR><LF>\n".to_owned()
-                    }
-                };
-                socket.write_all(reply.as_bytes()).await?;
-            }
-            SessionState::ReadingData { ref mut data } => {
-                if buf == b".\n" || buf == b".\r\n" {
-                    socket.write_all("250 Ok\n".as_bytes()).await?;
-                    state = SessionState::Initial;
-                } else {
-                    data.extend(&buf);
-                }
-            }
+        match state.handle(&buf)? {
+            Response::Quit => return Ok(()),
+            Response::Continue => continue,
+            Response::Reply(reply) => socket.write_all(reply.as_bytes()).await?,
         };
     }
 }
